@@ -37,6 +37,18 @@ def _num(x, defecto=None):
     return int(f) if f == int(f) else f
 
 
+def es_premium(v):
+    """Interpreta el campo 'premium' de un pedido (EVENTO 1).
+    Acepta true/false, 1/0, "1"/"0", "si"/"no", "true"/"false", vacío o null."""
+    if v is None:
+        return False
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    return str(v).strip().lower() in ("1", "true", "si", "sí", "s", "yes", "y", "premium", "x")
+
+
 def a_minutos(h, defecto=480):
     """Convierte "HH:MM" a minutos desde las 00:00 (ej: "08:00" -> 480)."""
     if h is None:
@@ -70,6 +82,24 @@ class Datos:
         self.c_minuto = g("costo_por_minuto_total", 1)  # costo por cada minuto de makespan
         self.c_falla = g("costo_por_falla", 200)    # costo por cada pedido no entregado
 
+        # --- EVENTO 1: costo por minuto de espera de los pedidos premium ---
+        # No sé el nombre exacto del campo en 'mundo' (lo dice la guía del evento),
+        # así que probamos nombres probables y, si no, cualquier clave con "premium".
+        self.c_premium = None
+        for k in ("costo_por_minuto_premium", "costo_premium_por_minuto", "costo_minuto_premium",
+                  "costo_premium", "costo_por_premium"):
+            if _num(mundo.get(k)) is not None:
+                self.c_premium = _num(mundo.get(k))
+                break
+        if self.c_premium is None:
+            for k, v in mundo.items():
+                if "premium" in str(k).lower() and _num(v) is not None:
+                    self.c_premium = _num(v)
+                    break
+        self.premium_en_mundo = self.c_premium is not None
+        if self.c_premium is None:
+            self.c_premium = 1  # valor provisorio si no se encontró (se avisa en main.py)
+
         # --- Pedidos ---
         # Usamos índices internos 1..n (el 0 queda reservado para el depósito).
         self.n = len(pedidos)
@@ -78,6 +108,16 @@ class Datos:
         self.pos = [self.dep] + [(int(_num(p["x"])), int(_num(p["y"]))) for p in pedidos]
         # peso[i] = peso del pedido i (si falta, 0)
         self.peso = [0] + [(_num(p.get("peso"), 0) or 0) for p in pedidos]
+        # prem[i] = 1 si el pedido i es premium (debe recibirse lo antes posible)
+        self.prem = [0] + [1 if es_premium(p.get("premium")) else 0 for p in pedidos]
+        self.hay_prem = any(self.prem)
+        # Avisos para mostrar en consola (los imprime main.py)
+        self.avisos = []
+        if self.hay_prem and not self.premium_en_mundo:
+            self.avisos.append(
+                "HAY PEDIDOS PREMIUM pero no encontré el costo premium en 'mundo' "
+                "(claves: %s). Uso %s por minuto. Revisá la guía del evento y ajustá "
+                "Datos.c_premium en planner/modelo.py." % (sorted(mundo.keys()), self.c_premium))
         # Para pasar de id original a índice interno
         self.indice = {pid: i + 1 for i, pid in enumerate(self.ids)}
         # Matriz de distancias Manhattan entre todos los puntos (depósito incluido):
@@ -108,57 +148,70 @@ class Evaluador:
     def __init__(self, datos):
         self.d = datos
 
-    def _calc(self, sol):
-        """Recorre la solución y devuelve todos los componentes del costo.
-        Está escrita de forma compacta porque se llama cientos de miles de veces."""
+    def ruta(self, vid, viajes):
+        """Costo parcial de UN vehículo. Devuelve la tupla:
+            (cuadras, minutos_hasta_volver, minutos_premium, pedidos, costo_fijo, excesos)
+        Simula parada por parada para conocer la hora de llegada a cada pedido
+        (hace falta para el costo de los premium del Evento 1).
+        El solver la usa para recalcular SOLO el vehículo que cambió."""
         d = self.d
         D = d.dist
         mc = d.min_cuadra
         ts = d.t_servicio
-        dist_tot = 0     # cuadras recorridas entre todos los vehículos
-        fijo = 0         # suma de costos fijos de los vehículos usados
-        usados = 0       # cantidad de vehículos usados
-        mk = 0           # makespan: minutos hasta que vuelve el último vehículo
-        entregados = 0   # pedidos entregados
-        exceso = 0       # cantidad de viajes que se pasan de capacidad
-
-        for vid, viajes in sol.items():
-            dur = 0   # duración total de este vehículo
-            nv = 0    # cantidad de viajes de este vehículo
-            for t in viajes:
-                if not t:
-                    continue
-                # Distancia del viaje: depósito -> primer pedido -> ... -> último -> depósito
-                c = D[0][t[0]]
-                a = t[0]
-                for b in t[1:]:
-                    c += D[a][b]
-                    a = b
-                c += D[a][0]
-                dist_tot += c
-                # Tiempo del viaje: manejar + entregar cada pedido
-                dur += c * mc + ts * len(t)
-                nv += 1
-                entregados += len(t)
-                # Chequeo de capacidad (solo si hay límites)
-                if d.hay_cap:
-                    w = 0
-                    for i in t:
-                        w += d.peso[i]
-                    if w > d.cap[vid]:
-                        exceso += 1
+        prem = d.prem
+        tm = 0        # reloj del vehículo (minutos desde la salida)
+        nv = 0        # cantidad de viajes
+        dist = 0      # cuadras recorridas
+        pm = 0        # suma de minutos hasta que EMPIEZA la entrega de cada premium
+        cnt = 0       # pedidos entregados
+        exceso = 0    # viajes que se pasan de capacidad
+        for t in viajes:
+            if not t:
+                continue
             if nv:
-                usados += 1
-                fijo += d.fijo[vid]
-                # Entre viaje y viaje hay una parada DEPOSITO que cuesta tiempo_carga
-                dur += d.t_carga * (nv - 1)
-                if dur > mk:
-                    mk = dur
+                tm += d.t_carga          # parada DEPOSITO: recarga entre viajes
+            a = 0
+            for b in t:
+                k = D[a][b]
+                dist += k
+                tm += k * mc             # llegada al pedido b
+                if prem[b]:
+                    pm += tm             # la entrega empieza al llegar
+                tm += ts                 # tiempo de servicio
+                a = b
+            k = D[a][0]
+            dist += k
+            tm += k * mc                 # vuelta al depósito
+            nv += 1
+            cnt += len(t)
+            if d.hay_cap:
+                w = 0
+                for i in t:
+                    w += d.peso[i]
+                if w > d.cap[vid]:
+                    exceso += 1
+        fijo = d.fijo[vid] if nv else 0  # solo se paga si el vehículo se usa
+        return dist, tm, pm, cnt, fijo, exceso
 
-        fallas = d.n - entregados  # pedidos que no aparecen en el plan fallan
+    def _calc(self, sol):
+        """Suma los costos parciales de todos los vehículos y arma el costo total."""
+        d = self.d
+        dist_tot = fijo = usados = mk = entregados = exceso = pm = 0
+        for vid, viajes in sol.items():
+            dist, tm, p, cnt, f, ex = self.ruta(vid, viajes)
+            dist_tot += dist
+            pm += p
+            entregados += cnt
+            fijo += f
+            exceso += ex
+            if cnt:
+                usados += 1
+                if tm > mk:
+                    mk = tm              # makespan: el último en volver
+        fallas = d.n - entregados        # pedidos que no aparecen en el plan fallan
         total = (d.c_cuadra * dist_tot + fijo + d.c_minuto * mk
-                 + d.c_falla * fallas + PENAL * exceso)
-        return total, dist_tot, usados, fijo, mk, fallas, entregados
+                 + d.c_falla * fallas + d.c_premium * pm + PENAL * exceso)
+        return total, dist_tot, usados, fijo, mk, fallas, entregados, pm
 
     def costo(self, sol):
         """Devuelve solo el costo total (lo usa el solver para comparar planes)."""
@@ -167,7 +220,10 @@ class Evaluador:
     def desglose(self, sol):
         """Texto con el detalle del costo, con el mismo formato que el simulador."""
         d = self.d
-        total, dist, usados, fijo, mk, fallas, entr = self._calc(sol)
+        total, dist, usados, fijo, mk, fallas, entr, pm = self._calc(sol)
+        extra = ""
+        if d.hay_prem:
+            extra = "\n  premium %d min acumulados x %g = %g" % (pm, d.c_premium, d.c_premium * pm)
         return (
             "\nCOSTO TOTAL: %g\n"
             "  distancia %d cuadras x %g = %g\n"
@@ -177,5 +233,5 @@ class Evaluador:
             "  Entregas: %d/%d"
             % (total, dist, d.c_cuadra, d.c_cuadra * dist, usados, fijo,
                mk, d.c_minuto, d.c_minuto * mk, fallas, d.c_falla,
-               d.c_falla * fallas, entr, d.n)
+               d.c_falla * fallas, entr, d.n) + extra
         )
