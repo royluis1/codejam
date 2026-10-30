@@ -2,8 +2,11 @@
 
 
 def validar(sol, datos):
+    """Devuelve una lista de errores (vacía si el plan es válido).
+    Reglas de la guía: no usar vehículos inexistentes, ni pedidos inexistentes,
+    ni repetir pedidos. Además chequeamos que no se exceda la capacidad."""
     errores = []
-    vistos = set()
+    vistos = set()  # pedidos ya asignados, para detectar repetidos
     for vid, viajes in sol.items():
         if vid not in datos.cap:
             errores.append("vehiculo inexistente: %s" % vid)

@@ -1,0 +1,13 @@
+clave,valor
+grilla_ancho,20
+grilla_alto,20
+deposito_x,0
+deposito_y,0
+hora_salida,08:00
+tiempo_servicio,5
+tiempo_carga,10
+min_por_cuadra,3
+costo_por_cuadra,3
+costo_por_vehiculo,60
+costo_por_minuto_total,1
+costo_por_falla,200

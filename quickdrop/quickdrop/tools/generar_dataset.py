@@ -13,26 +13,33 @@ def main():
     if not a:
         print(__doc__)
         sys.exit(1)
+    # Leer argumentos (con valores por defecto)
     carpeta = a[0]
     n = int(a[1]) if len(a) > 1 else 40
     nv = int(a[2]) if len(a) > 2 else 5
-    rng = random.Random(int(a[3]) if len(a) > 3 else 1)
-    dx = int(a[4]) if len(a) > 4 else 0
+    rng = random.Random(int(a[3]) if len(a) > 3 else 1)  # semilla: mismo número = mismo dataset
+    dx = int(a[4]) if len(a) > 4 else 0                  # posición del depósito
     dy = int(a[5]) if len(a) > 5 else 0
     os.makedirs(carpeta, exist_ok=True)
+
+    # Parámetros del mundo (los mismos valores que la guía)
     mundo = {"grilla_ancho": 20, "grilla_alto": 20, "deposito_x": dx, "deposito_y": dy,
              "hora_salida": "08:00", "tiempo_servicio": 5, "tiempo_carga": 10,
              "min_por_cuadra": 3, "costo_por_cuadra": 3, "costo_por_vehiculo": 60,
              "costo_por_minuto_total": 1, "costo_por_falla": 200}
+    # Pedidos en posiciones y pesos al azar
     pedidos = [{"id": i, "x": rng.randint(0, 19), "y": rng.randint(0, 19),
                 "peso": rng.randint(1, 15)} for i in range(1, n + 1)]
     vehiculos = [{"id": "V%d" % i} for i in range(1, nv + 1)]
+
+    # Escribir los archivos en JSON...
     with open(os.path.join(carpeta, "mundo.json"), "w") as f:
         json.dump(mundo, f, indent=1)
     with open(os.path.join(carpeta, "pedidos.json"), "w") as f:
         json.dump(pedidos, f)
     with open(os.path.join(carpeta, "vehiculos.json"), "w") as f:
         json.dump(vehiculos, f)
+    # ...y en CSV (mismos datos)
     with open(os.path.join(carpeta, "mundo.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["clave", "valor"])
